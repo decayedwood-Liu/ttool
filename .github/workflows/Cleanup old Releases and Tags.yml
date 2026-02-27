@@ -1,0 +1,77 @@
+
+on:
+  schedule:
+    # 每天凌晨 2 点运行（UTC）
+    - cron: '0 2 * * *'
+  workflow_dispatch:   # 支持手动触发
+
+jobs:
+  delete-old-releases-and-tags:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 需要写权限以删除 Release 和 Tag
+    steps:
+      - name: Delete old releases and their tags (keep latest 2)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // 获取所有 Releases（最新在前）
+            const { data: releases } = await github.rest.repos.listReleases({
+              owner,
+              repo,
+              per_page: 100   // 一次最多取 100 个，如需处理更多可增加分页逻辑
+            });
+
+            console.log(`Found ${releases.length} releases total.`);
+
+            const KEEP = 2;   // 保留最新几个 Release
+            if (releases.length <= KEEP) {
+              console.log('No old releases to delete.');
+              return;
+            }
+
+            const toDelete = releases.slice(KEEP); // 需要删除的 Release 列表
+
+            for (const release of toDelete) {
+              const releaseId = release.id;
+              const tagName = release.tag_name;
+              const releaseName = release.name || tagName;
+
+              console.log(`\nProcessing release: ${releaseName} (id: ${releaseId})`);
+
+              // 1. 删除 Release
+              try {
+                await github.rest.repos.deleteRelease({
+                  owner,
+                  repo,
+                  release_id: releaseId
+                });
+                console.log(`✅ Deleted release ${releaseName}`);
+              } catch (error) {
+                console.error(`❌ Failed to delete release ${releaseName}:`, error.message);
+                // 如果删除 Release 失败，跳过删除 tag，避免留下孤零零的 tag（虽然可手动删）
+                continue;
+              }
+
+              // 2. 删除对应的 Git 标签（如果存在）
+              if (tagName) {
+                try {
+                  await github.rest.git.deleteRef({
+                    owner,
+                    repo,
+                    ref: `tags/${tagName}`
+                  });
+                  console.log(`✅ Deleted tag ${tagName}`);
+                } catch (error) {
+                  // 可能标签已被其他方式删除，或者没有该标签
+                  console.log(`⚠️  Could not delete tag ${tagName}:`, error.message);
+                }
+              } else {
+                console.log(`ℹ️  Release ${releaseName} has no associated tag, skipping tag deletion.`);
+              }
+            }
+
+            console.log('\nCleanup finished.');
