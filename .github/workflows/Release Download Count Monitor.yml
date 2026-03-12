@@ -18,12 +18,12 @@ jobs:
   monitor-downloads:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout 仓库代码（升级到v4.2.0+，支持Node.js 24）
+      - name: Checkout 仓库代码
         uses: actions/checkout@v4.2.0
         with:
           fetch-depth: 1  # 仅拉取最新提交，减少冲突
 
-      - name: 设置环境变量（配置项）
+      - name: 设置环境变量
         run: |
           echo "REPO_OWNER=decayedwood-Liu" >> $GITHUB_ENV
           echo "REPO_NAME=ttool" >> $GITHUB_ENV
@@ -31,17 +31,16 @@ jobs:
           echo "LOG_FILE=daily_download_log.txt" >> $GITHUB_ENV
           echo "CACHE_FILE=.cache/last_download_count.json" >> $GITHUB_ENV
 
-      - name: 恢复缓存（升级到v4，解决Node.js警告）
+      - name: 恢复缓存
         id: restore-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.CACHE_FILE }}
-          # 修复cache key重复问题：用日期+小时作为key前缀，避免冲突
           key: ${{ runner.os }}-download-count-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ${{ runner.os }}-download-count-
 
-      - name: 初始化缓存文件（若不存在）
+      - name: 初始化缓存文件
         run: |
           mkdir -p .cache
           if [ ! -f ${{ env.CACHE_FILE }} ]; then
@@ -64,17 +63,14 @@ jobs:
           import os
           from datetime import datetime
           import pytz
-
           REPO_OWNER = os.getenv("REPO_OWNER")
           REPO_NAME = os.getenv("REPO_NAME")
           FILE_NAME = os.getenv("FILE_NAME")
           LOG_FILE = os.getenv("LOG_FILE")
           CACHE_FILE = os.getenv("CACHE_FILE")
           GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-
           def get_beijing_time():
               return datetime.now(pytz.timezone('Asia/Shanghai'))
-
           def get_latest_download_count():
               url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
               headers = {
@@ -93,7 +89,6 @@ jobs:
               except Exception as e:
                   print(f"调用GitHub API失败: {e}")
                   return None
-
           # 读取缓存
           try:
               with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -104,14 +99,12 @@ jobs:
               print(f"读取缓存失败，初始化缓存: {e}")
               last_count = None
               last_check_time = None
-
           current_count = get_latest_download_count()
           current_time = get_beijing_time().strftime("%Y-%m-%d %H:%M:%S")
           
           if current_count is None:
               print("获取当前下载次数失败，本次跳过")
               exit(0)
-
           if last_count is None:
               print(f"首次检查 - 当前下载次数: {current_count} | 时间: {current_time}")
               with open(CACHE_FILE, "w", encoding="utf-8") as f:
@@ -120,7 +113,6 @@ jobs:
                       "last_check_time": current_time
                   }, f)
               exit(0)
-
           if current_count > last_count:
               increase = current_count - last_count
               log_line = f"[{last_check_time} ~ {current_time}] 下载次数从 {last_count} 增加到 {current_count}（新增 {increase} 次）\n"
@@ -150,28 +142,44 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 保存缓存（升级到v4）
+      - name: 保存缓存
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CACHE_FILE }}
           key: ${{ runner.os }}-download-count-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: 拉取最新代码（解决提交冲突）
-        run: |
-          git pull origin ${{ github.ref_name }} --rebase
-
-      - name: 提交日志文件到仓库（修复exit code 128）
+      - name: 提交日志文件到仓库（增强健壮性）
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add ${{ env.LOG_FILE }}
-          # 避免空提交，且强制提交（解决分支保护）
+
           if git diff --staged --quiet; then
               echo "日志文件无变更，无需提交"
-          else
-              git commit -m "Update download log: $(TZ='Asia/Shanghai' date +%Y-%m-%d_%H:%M:%S)" || git commit -m "Update download log: $(TZ='Asia/Shanghai' date +%Y-%m-%d_%H:%M:%S)" --no-verify
-              git push origin ${{ github.ref_name }} --force-with-lease || git push origin ${{ github.ref_name }} --force
-              echo "下载次数日志已提交到仓库"
+              exit 0
           fi
+
+          git commit -m "Update download log: $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
+
+          # 最多重试3次推送，自动处理远程冲突
+          for i in {1..3}; do
+              echo "推送尝试 #$i"
+              if git push origin ${{ github.ref_name }}; then
+                  echo "推送成功"
+                  exit 0
+              else
+                  echo "推送失败，拉取远程变更并合并..."
+                  git pull --rebase origin ${{ github.ref_name }} || {
+                      echo "Rebase 失败，尝试强制重置到远程分支（丢弃本地临时提交）"
+                      git fetch origin ${{ github.ref_name }}
+                      git reset --hard origin/${{ github.ref_name }}
+                      git add ${{ env.LOG_FILE }}
+                      git commit -m "Update download log (forced sync): $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
+                  }
+              fi
+          done
+
+          echo "所有推送尝试均失败"
+          exit 1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
