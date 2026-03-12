@@ -3,36 +3,30 @@ name: Release Download Count Monitor
 on:
   schedule:
     - cron: '0,30 * * * *'  # 每半小时执行
-    - cron: '0 16 * * *'   # 北京时间0点清空日志
-  workflow_dispatch:        # 手动触发测试
+  workflow_dispatch:        # 手动触发
 
-# 全局环境变量：强制使用Node.js 24（解决弃用警告）
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
-  contents: write  # 确保有写入仓库的权限
-  repository-projects: read
+  contents: write
 
 jobs:
   monitor-downloads:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout 仓库代码
-        uses: actions/checkout@v4.2.0
+      - uses: actions/checkout@v4.2.0
         with:
-          fetch-depth: 1  # 仅拉取最新提交，减少冲突
+          fetch-depth: 1
 
       - name: 设置环境变量
         run: |
           echo "REPO_OWNER=decayedwood-Liu" >> $GITHUB_ENV
           echo "REPO_NAME=ttool" >> $GITHUB_ENV
           echo "FILE_NAME=stocklist.json" >> $GITHUB_ENV
-          echo "LOG_FILE=daily_download_log.txt" >> $GITHUB_ENV
           echo "CACHE_FILE=.cache/last_download_count.json" >> $GITHUB_ENV
 
       - name: 恢复缓存
-        id: restore-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.CACHE_FILE }}
@@ -47,30 +41,25 @@ jobs:
               echo '{"last_count": null, "last_check_time": null}' > ${{ env.CACHE_FILE }}
           fi
 
-      - name: 清空当日日志（仅北京时间0点执行）
-        if: github.event.schedule == '0 16 * * *'
-        run: |
-          BEIJING_DATE=$(TZ='Asia/Shanghai' date +%Y-%m-%d)
-          echo "===== ${BEIJING_DATE} stocklist.json 下载次数记录 =====" > ${{ env.LOG_FILE }}
-          echo "已清空当日日志，开始新一天记录"
-
-      - name: 核心逻辑：获取下载次数并对比
-        id: check-downloads
+      - name: 核心逻辑：记录下载次数 & 清理旧日志
         run: |
           python << 'EOF'
           import requests
           import json
           import os
-          from datetime import datetime
+          import glob
+          from datetime import datetime, timedelta
           import pytz
+
           REPO_OWNER = os.getenv("REPO_OWNER")
           REPO_NAME = os.getenv("REPO_NAME")
           FILE_NAME = os.getenv("FILE_NAME")
-          LOG_FILE = os.getenv("LOG_FILE")
           CACHE_FILE = os.getenv("CACHE_FILE")
           GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+
           def get_beijing_time():
               return datetime.now(pytz.timezone('Asia/Shanghai'))
+
           def get_latest_download_count():
               url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
               headers = {
@@ -89,6 +78,18 @@ jobs:
               except Exception as e:
                   print(f"调用GitHub API失败: {e}")
                   return None
+
+          # 当前北京时间
+          beijing_now = get_beijing_time()
+          today_str = beijing_now.strftime("%Y-%m-%d")
+          log_file = f"download_log_{today_str}.txt"
+
+          # 如果当天日志不存在，创建并写入标题
+          if not os.path.exists(log_file):
+              with open(log_file, "w", encoding="utf-8") as f:
+                  f.write(f"===== {today_str} stocklist.json 下载次数记录 =====\n")
+              print(f"创建新日志文件: {log_file}")
+
           # 读取缓存
           try:
               with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -99,12 +100,14 @@ jobs:
               print(f"读取缓存失败，初始化缓存: {e}")
               last_count = None
               last_check_time = None
+
           current_count = get_latest_download_count()
-          current_time = get_beijing_time().strftime("%Y-%m-%d %H:%M:%S")
-          
+          current_time = beijing_now.strftime("%Y-%m-%d %H:%M:%S")
+
           if current_count is None:
               print("获取当前下载次数失败，本次跳过")
               exit(0)
+
           if last_count is None:
               print(f"首次检查 - 当前下载次数: {current_count} | 时间: {current_time}")
               with open(CACHE_FILE, "w", encoding="utf-8") as f:
@@ -112,20 +115,12 @@ jobs:
                       "last_count": current_count,
                       "last_check_time": current_time
                   }, f)
-              exit(0)
-          if current_count > last_count:
+          elif current_count > last_count:
               increase = current_count - last_count
               log_line = f"[{last_check_time} ~ {current_time}] 下载次数从 {last_count} 增加到 {current_count}（新增 {increase} 次）\n"
               print(f"记录日志: {log_line.strip()}")
-              
-              if not os.path.exists(LOG_FILE):
-                  beijing_date = get_beijing_time().strftime("%Y-%m-%d")
-                  with open(LOG_FILE, "w", encoding="utf-8") as f:
-                      f.write(f"===== {beijing_date} stocklist.json 下载次数记录 =====\n")
-              
-              with open(LOG_FILE, "a", encoding="utf-8") as f:
+              with open(log_file, "a", encoding="utf-8") as f:
                   f.write(log_line)
-              
               with open(CACHE_FILE, "w", encoding="utf-8") as f:
                   json.dump({
                       "last_count": current_count,
@@ -138,6 +133,25 @@ jobs:
                       "last_count": last_count,
                       "last_check_time": current_time
                   }, f)
+
+          # 清理旧日志：只保留最近两天的文件
+          all_logs = glob.glob("download_log_*.txt")
+          dated_logs = []
+          for f in all_logs:
+              try:
+                  date_str = f.replace("download_log_", "").replace(".txt", "")
+                  date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+                  dated_logs.append((date_obj, f))
+              except ValueError:
+                  # 忽略文件名格式不匹配的文件
+                  pass
+          dated_logs.sort(reverse=True)  # 最新的在前
+
+          # 保留最新的两个，删除其余
+          for i, (date_obj, f) in enumerate(dated_logs):
+              if i >= 2:
+                  print(f"删除旧日志文件: {f}")
+                  os.remove(f)
           EOF
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -148,20 +162,25 @@ jobs:
           path: ${{ env.CACHE_FILE }}
           key: ${{ runner.os }}-download-count-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: 提交日志文件到仓库（增强健壮性）
+      - name: 提交日志文件到仓库
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add ${{ env.LOG_FILE }}
+
+          # 添加新增/修改的日志文件
+          git add download_log_*.txt
+
+          # 处理被删除的日志文件（确保 git 记录删除）
+          git ls-files --deleted | grep 'download_log_' | xargs -r git add
 
           if git diff --staged --quiet; then
-              echo "日志文件无变更，无需提交"
+              echo "无文件变更，无需提交"
               exit 0
           fi
 
-          git commit -m "Update download log: $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
+          git commit -m "Update download logs: $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
 
-          # 最多重试3次推送，自动处理远程冲突
+          # 重试推送机制（最多3次）
           for i in {1..3}; do
               echo "推送尝试 #$i"
               if git push origin ${{ github.ref_name }}; then
@@ -170,11 +189,12 @@ jobs:
               else
                   echo "推送失败，拉取远程变更并合并..."
                   git pull --rebase origin ${{ github.ref_name }} || {
-                      echo "Rebase 失败，尝试强制重置到远程分支（丢弃本地临时提交）"
+                      echo "Rebase 失败，强制重置到远程分支"
                       git fetch origin ${{ github.ref_name }}
                       git reset --hard origin/${{ github.ref_name }}
-                      git add ${{ env.LOG_FILE }}
-                      git commit -m "Update download log (forced sync): $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
+                      git add download_log_*.txt
+                      git ls-files --deleted | grep 'download_log_' | xargs -r git add
+                      git commit -m "Update download logs (forced sync): $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
                   }
               fi
           done
