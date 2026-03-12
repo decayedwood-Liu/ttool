@@ -1,0 +1,190 @@
+name: Release Download Count Monitor
+
+# 触发规则：
+# 1. 每半小时执行（UTC时间，北京时间=UTC+8）
+# 2. 每天UTC 16点 = 北京时间0点，清空当日日志
+on:
+  schedule:
+    - cron: '0,30 * * * *'  # 每半小时执行
+    - cron: '0 16 * * *'   # 北京时间0点清空日志
+  workflow_dispatch:        # 手动触发测试
+
+# 权限：允许读写仓库（提交日志）、调用GitHub API
+permissions:
+  contents: write
+  repository-projects: read
+
+jobs:
+  monitor-downloads:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 仓库代码
+        uses: actions/checkout@v4
+
+      - name: 设置环境变量（配置项）
+        run: |
+          # 替换为你的仓库信息和文件名
+          echo "REPO_OWNER=decayedwood-Liu" >> $GITHUB_ENV
+          echo "REPO_NAME=ttool" >> $GITHUB_ENV
+          echo "FILE_NAME=stocklist.json" >> $GITHUB_ENV
+          # 日志文件和缓存文件路径
+          echo "LOG_FILE=daily_download_log.txt" >> $GITHUB_ENV
+          echo "CACHE_FILE=.cache/last_download_count.json" >> $GITHUB_ENV
+
+      - name: 恢复缓存（上一次的下载次数和检查时间）
+        id: restore-cache
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ env.CACHE_FILE }}
+          key: ${{ runner.os }}-download-count-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-download-count-
+
+      - name: 初始化缓存文件（若不存在）
+        run: |
+          mkdir -p .cache
+          if [ ! -f ${{ env.CACHE_FILE }} ]; then
+              echo '{"last_count": null, "last_check_time": null}' > ${{ env.CACHE_FILE }}
+          fi
+
+      - name: 清空当日日志（仅北京时间0点执行）
+        if: github.event.schedule == '0 16 * * *'
+        run: |
+          # 获取北京时间的当日日期
+          BEIJING_DATE=$(TZ='Asia/Shanghai' date +%Y-%m-%d)
+          echo "===== ${BEIJING_DATE} stocklist.json 下载次数记录 =====" > ${{ env.LOG_FILE }}
+          echo "已清空当日日志，开始新一天记录"
+
+      - name: 核心逻辑：获取下载次数并对比
+        id: check-downloads
+        run: |
+          python << 'EOF'
+          import requests
+          import json
+          import os
+          from datetime import datetime
+          import pytz
+
+          # 从环境变量读取配置
+          REPO_OWNER = os.getenv("REPO_OWNER")
+          REPO_NAME = os.getenv("REPO_NAME")
+          FILE_NAME = os.getenv("FILE_NAME")
+          LOG_FILE = os.getenv("LOG_FILE")
+          CACHE_FILE = os.getenv("CACHE_FILE")
+          # GitHub API Token（Actions内置，无需手动配置）
+          GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+
+          # 获取北京时间
+          def get_beijing_time():
+              return datetime.now(pytz.timezone('Asia/Shanghai'))
+
+          # 调用GitHub API获取最新Release中文件的下载次数
+          def get_latest_download_count():
+              # API路径：获取最新Release
+              url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
+              headers = {
+                  "Authorization": f"token {GITHUB_TOKEN}",
+                  "Accept": "application/vnd.github.v3+json"
+              }
+              try:
+                  response = requests.get(url, headers=headers, timeout=10)
+                  response.raise_for_status()
+                  release_data = response.json()
+                  
+                  # 遍历Release中的所有资产，找到目标文件
+                  for asset in release_data.get("assets", []):
+                      if asset["name"] == FILE_NAME:
+                          return asset["download_count"]  # 返回官方下载次数
+                  
+                  # 未找到文件
+                  print(f"错误：在最新Release中未找到文件 {FILE_NAME}")
+                  return None
+              except Exception as e:
+                  print(f"调用GitHub API失败: {e}")
+                  return None
+
+          # 读取缓存的上一次数据
+          try:
+              with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                  cache = json.load(f)
+              last_count = cache["last_count"]
+              last_check_time = cache["last_check_time"]
+          except Exception as e:
+              print(f"读取缓存失败，初始化缓存: {e}")
+              last_count = None
+              last_check_time = None
+
+          # 获取当前下载次数和时间
+          current_count = get_latest_download_count()
+          current_time = get_beijing_time().strftime("%Y-%m-%d %H:%M:%S")
+          
+          if current_count is None:
+              print("获取当前下载次数失败，本次跳过")
+              exit(0)
+
+          # 首次检查：初始化缓存
+          if last_count is None:
+              print(f"首次检查 - 当前下载次数: {current_count} | 时间: {current_time}")
+              with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                  json.dump({
+                      "last_count": current_count,
+                      "last_check_time": current_time
+                  }, f)
+              exit(0)
+
+          # 对比下载次数
+          if current_count > last_count:
+              # 次数增加，记录日志
+              increase = current_count - last_count
+              log_line = f"[{last_check_time} ~ {current_time}] 下载次数从 {last_count} 增加到 {current_count}（新增 {increase} 次）\n"
+              print(f"记录日志: {log_line.strip()}")
+              
+              # 确保日志文件存在（防止0点前首次增加）
+              if not os.path.exists(LOG_FILE):
+                  beijing_date = get_beijing_time().strftime("%Y-%m-%d")
+                  with open(LOG_FILE, "w", encoding="utf-8") as f:
+                      f.write(f"===== {beijing_date} stocklist.json 下载次数记录 =====\n")
+              
+              # 追加日志
+              with open(LOG_FILE, "a", encoding="utf-8") as f:
+                  f.write(log_line)
+              
+              # 更新缓存
+              with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                  json.dump({
+                      "last_count": current_count,
+                      "last_check_time": current_time
+                  }, f)
+          else:
+              # 次数未增加，仅更新检查时间
+              print(f"下载次数未变化 - 当前: {current_count} | 上次: {last_count} | 时间: {current_time}")
+              with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                  json.dump({
+                      "last_count": last_count,
+                      "last_check_time": current_time
+                  }, f)
+          EOF
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Actions内置Token，无需手动创建
+
+      - name: 保存缓存（更新后的下载次数）
+        uses: actions/cache/save@v3
+        with:
+          path: ${{ env.CACHE_FILE }}
+          key: ${{ runner.os }}-download-count-${{ github.run_id }}
+
+      - name: 提交日志文件到仓库
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add ${{ env.LOG_FILE }}
+          # 仅当日志文件有变更时提交
+          if git diff --staged --quiet; then
+              echo "日志文件无变更，无需提交"
+          else
+              git commit -m "Update download log: $(TZ='Asia/Shanghai' date +%Y-%m-%d_%H:%M:%S)"
+              git push
+              echo "下载次数日志已提交到仓库"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
