@@ -26,19 +26,18 @@ jobs:
           echo "FILE_NAME=stocklist.json" >> $GITHUB_ENV
           echo "CACHE_FILE=.cache/last_download_count.json" >> $GITHUB_ENV
 
-      - name: 恢复缓存
+      - name: 恢复缓存（使用固定 key，确保每次都能恢复）
+        id: restore-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.CACHE_FILE }}
-          key: ${{ runner.os }}-download-count-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            ${{ runner.os }}-download-count-
+          key: ${{ runner.os }}-download-count  # 固定 key，每次保存会覆盖
 
-      - name: 初始化缓存文件
+      - name: 初始化缓存文件（若不存在）
         run: |
           mkdir -p .cache
           if [ ! -f ${{ env.CACHE_FILE }} ]; then
-              echo '{"last_count": null, "last_check_time": null}' > ${{ env.CACHE_FILE }}
+              echo '{"last_count": null, "last_check_time": null, "last_release_id": null}' > ${{ env.CACHE_FILE }}
           fi
 
       - name: 核心逻辑：记录下载次数 & 清理旧日志
@@ -60,7 +59,7 @@ jobs:
           def get_beijing_time():
               return datetime.now(pytz.timezone('Asia/Shanghai'))
 
-          def get_latest_download_count():
+          def get_latest_release_data():
               url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
               headers = {
                   "Authorization": f"token {GITHUB_TOKEN}",
@@ -69,19 +68,30 @@ jobs:
               try:
                   response = requests.get(url, headers=headers, timeout=10)
                   response.raise_for_status()
-                  release_data = response.json()
-                  for asset in release_data.get("assets", []):
-                      if asset["name"] == FILE_NAME:
-                          return asset["download_count"]
-                  print(f"错误：在最新Release中未找到文件 {FILE_NAME}")
-                  return None
+                  return response.json()
               except Exception as e:
                   print(f"调用GitHub API失败: {e}")
                   return None
 
-          # 当前北京时间
-          beijing_now = get_beijing_time()
-          today_str = beijing_now.strftime("%Y-%m-%d")
+          # 获取当前最新 release 信息
+          release_data = get_latest_release_data()
+          if release_data is None:
+              print("获取最新 release 失败，本次跳过")
+              exit(0)
+
+          # 提取下载次数
+          current_count = None
+          for asset in release_data.get("assets", []):
+              if asset["name"] == FILE_NAME:
+                  current_count = asset["download_count"]
+                  break
+          if current_count is None:
+              print(f"错误：在最新Release中未找到文件 {FILE_NAME}")
+              exit(0)
+
+          current_release_id = release_data["id"]
+          current_time = get_beijing_time().strftime("%Y-%m-%d %H:%M:%S")
+          today_str = get_beijing_time().strftime("%Y-%m-%d")
           log_file = f"download_log_{today_str}.txt"
 
           # 如果当天日志不存在，创建并写入标题
@@ -94,28 +104,43 @@ jobs:
           try:
               with open(CACHE_FILE, "r", encoding="utf-8") as f:
                   cache = json.load(f)
-              last_count = cache["last_count"]
-              last_check_time = cache["last_check_time"]
+              last_count = cache.get("last_count")
+              last_check_time = cache.get("last_check_time")
+              last_release_id = cache.get("last_release_id")
           except Exception as e:
               print(f"读取缓存失败，初始化缓存: {e}")
               last_count = None
               last_check_time = None
+              last_release_id = None
 
-          current_count = get_latest_download_count()
-          current_time = beijing_now.strftime("%Y-%m-%d %H:%M:%S")
+          # 判断是否为同一个 release
+          same_release = (last_release_id == current_release_id)
 
-          if current_count is None:
-              print("获取当前下载次数失败，本次跳过")
-              exit(0)
-
-          if last_count is None:
+          # 根据情况处理
+          if not same_release:
+              # 新 release 发布，重置基线
+              log_line = f"[{current_time}] 新 release 发布 (ID: {current_release_id})，下载次数从 0 开始计数\n"
+              print(log_line.strip())
+              with open(log_file, "a", encoding="utf-8") as f:
+                  f.write(log_line)
+              # 重置缓存
+              with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                  json.dump({
+                      "last_count": current_count,
+                      "last_check_time": current_time,
+                      "last_release_id": current_release_id
+                  }, f)
+          elif last_count is None:
+              # 首次运行
               print(f"首次检查 - 当前下载次数: {current_count} | 时间: {current_time}")
               with open(CACHE_FILE, "w", encoding="utf-8") as f:
                   json.dump({
                       "last_count": current_count,
-                      "last_check_time": current_time
+                      "last_check_time": current_time,
+                      "last_release_id": current_release_id
                   }, f)
           elif current_count > last_count:
+              # 同一 release 下载次数增加
               increase = current_count - last_count
               log_line = f"[{last_check_time} ~ {current_time}] 下载次数从 {last_count} 增加到 {current_count}（新增 {increase} 次）\n"
               print(f"记录日志: {log_line.strip()}")
@@ -124,14 +149,30 @@ jobs:
               with open(CACHE_FILE, "w", encoding="utf-8") as f:
                   json.dump({
                       "last_count": current_count,
-                      "last_check_time": current_time
+                      "last_check_time": current_time,
+                      "last_release_id": current_release_id
+                  }, f)
+          elif current_count < last_count:
+              # 理论上同一 release 下载次数不会减少，但以防 API 异常，记录并重置
+              log_line = f"[{current_time}] 警告：下载次数从 {last_count} 降至 {current_count}，可能 API 异常或 release 变更，重置计数\n"
+              print(log_line.strip())
+              with open(log_file, "a", encoding="utf-8") as f:
+                  f.write(log_line)
+              with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                  json.dump({
+                      "last_count": current_count,
+                      "last_check_time": current_time,
+                      "last_release_id": current_release_id
                   }, f)
           else:
+              # 下载次数未变化
               print(f"下载次数未变化 - 当前: {current_count} | 上次: {last_count} | 时间: {current_time}")
+              # 仅更新检查时间
               with open(CACHE_FILE, "w", encoding="utf-8") as f:
                   json.dump({
                       "last_count": last_count,
-                      "last_check_time": current_time
+                      "last_check_time": current_time,
+                      "last_release_id": last_release_id
                   }, f)
 
           # 清理旧日志：只保留最近两天的文件
@@ -143,12 +184,9 @@ jobs:
                   date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
                   dated_logs.append((date_obj, f))
               except ValueError:
-                  # 忽略文件名格式不匹配的文件
                   pass
-          dated_logs.sort(reverse=True)  # 最新的在前
-
-          # 保留最新的两个，删除其余
-          for i, (date_obj, f) in enumerate(dated_logs):
+          dated_logs.sort(reverse=True)
+          for i, (_, f) in enumerate(dated_logs):
               if i >= 2:
                   print(f"删除旧日志文件: {f}")
                   os.remove(f)
@@ -156,13 +194,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 保存缓存
+      - name: 保存缓存（固定 key，覆盖旧缓存）
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CACHE_FILE }}
-          key: ${{ runner.os }}-download-count-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ runner.os }}-download-count  # 与 restore 的 key 一致
 
-      - name: 提交日志文件到仓库
+      - name: 提交日志文件到仓库（增强健壮性）
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
@@ -180,7 +218,7 @@ jobs:
 
           git commit -m "Update download logs: $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
 
-          # 重试推送机制（最多3次）
+          # 重试推送机制（最多3次），自动处理远程冲突
           for i in {1..3}; do
               echo "推送尝试 #$i"
               if git push origin ${{ github.ref_name }}; then
@@ -189,7 +227,7 @@ jobs:
               else
                   echo "推送失败，拉取远程变更并合并..."
                   git pull --rebase origin ${{ github.ref_name }} || {
-                      echo "Rebase 失败，强制重置到远程分支"
+                      echo "Rebase 失败，强制重置到远程分支（丢弃本地临时提交）"
                       git fetch origin ${{ github.ref_name }}
                       git reset --hard origin/${{ github.ref_name }}
                       git add download_log_*.txt
