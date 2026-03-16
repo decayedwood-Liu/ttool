@@ -2,69 +2,141 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>下载统计页面</title>
+    <title>Stocklist.json 下载统计</title>
     <style>
         body {
-            max-width: 800px;
+            max-width: 1000px;
             margin: 50px auto;
             font-family: Arial, sans-serif;
-            text-align: center;
+            padding: 0 20px;
             color: #333;
         }
-        .tip {
-            font-size: 16px;
-            color: #666;
-            margin-top: 20px;
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
         }
-        .status {
-            margin-top: 10px;
-            font-size: 18px;
+        .counter-box {
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            margin-bottom: 30px;
         }
-        .success {
+        .total-count {
+            font-size: 36px;
+            font-weight: bold;
             color: #2ea44f;
+            margin: 10px 0;
         }
-        .error {
-            color: #d73a4a;
+        .version-box {
+            margin: 10px 0;
+            font-size: 18px;
+            color: #666;
+        }
+        .download-btn {
+            display: inline-block;
+            background: #2ea44f;
+            color: white;
+            padding: 12px 30px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 16px;
+            margin-top: 10px;
+            cursor: pointer;
+        }
+        .download-btn:hover {
+            background: #22863a;
+        }
+        .records-box {
+            margin-top: 40px;
+        }
+        .records-title {
+            font-size: 20px;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 8px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        th {
+            background: #f8f8f8;
+            font-weight: bold;
+        }
+        tr:hover {
+            background: #f9f9f9;
+        }
+        .empty-tip {
+            text-align: center;
+            padding: 30px;
+            color: #999;
         }
     </style>
 </head>
 <body>
-    <h1>下载统计已触发</h1>
-    <div class="tip">统计信息正在记录，你可单独发起下载请求</div>
-    <div id="status" class="status">正在记录访问信息...</div>
+    <div class="header">
+        <h1>Stocklist.json 下载中心</h1>
+    </div>
+
+    <!-- 计数 + 版本号 + 下载按钮 -->
+    <div class="counter-box">
+        <div>今日总下载次数</div>
+        <div id="totalCount" class="total-count">0</div>
+        <div class="version-box">当前版本：<span id="version">加载中...</span></div>
+        <a id="downloadLink" class="download-btn" href="#" target="_blank">下载最新版本</a>
+    </div>
+
+    <!-- 当日下载记录表格 -->
+    <div class="records-box">
+        <div class="records-title">今日下载记录（仅显示当前页面访问的记录）</div>
+        <table id="recordsTable">
+            <thead>
+                <tr>
+                    <th>序号</th>
+                    <th>下载时间</th>
+                    <th>IP地址</th>
+                </tr>
+            </thead>
+            <tbody id="recordsBody">
+                <tr>
+                    <td colspan="3" class="empty-tip">暂无下载记录</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
 
     <script>
-        // 核心配置（已修复仓库名，仅需确认Token正确）
+        // 核心配置
         const CONFIG = {
-            // ✅ 正确的仓库API根地址（匹配你的ttool仓库）
-            repoApiRoot: 'https://api.github.com/repos/decayedwood-Liu/ttool/contents/',
-            // ✅ 你的Token（已保留，确认勾选repo权限）
-            githubToken: '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',
-            // 保留记录的天数
-            keepDays: 3
+            // 最新文件下载链接
+            downloadUrl: 'https://github.com/decayedwood-Liu/ttool/releases/latest/download/stocklist.json',
+            // 获取版本号的API（GitHub Releases）
+            versionApi: 'https://api.github.com/repos/decayedwood-Liu/ttool/releases/latest'
         };
 
-        // 工具函数1：获取当前日期（YYYY-MM-DD）
-        function getCurrentDate() {
-            const date = new Date();
-            return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+        // 本地存储键名（按天区分）
+        const today = new Date().toISOString().split('T')[0]; // 2026-03-17
+        const STORAGE_KEY = `download_records_${today}`;
+
+        // 1. 初始化本地存储
+        function initStorage() {
+            if (!localStorage.getItem(STORAGE_KEY)) {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify([]));
+            }
         }
 
-        // 工具函数2：获取N天前的日期
-        function getDateBeforeNDays(n) {
-            const date = new Date();
-            date.setDate(date.getDate() - n);
-            return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-        }
-
-        // 工具函数3：获取用户IP（替换为更稳定的API，避免跨域）
+        // 2. 获取用户IP
         async function getUserIP() {
             try {
-                // 替换为无跨域限制的IP API
-                const res = await fetch('https://api.ipify.org?format=json', {
-                    mode: 'cors', // 强制跨域
-                    cache: 'no-cache'
-                });
+                const res = await fetch('https://api.ipify.org?format=json');
                 const data = await res.json();
                 return data.ip || '未知IP';
             } catch (err) {
@@ -73,135 +145,99 @@
             }
         }
 
-        // 工具函数4：获取文件SHA（增加容错）
-        async function getFileSHA(filename) {
-            try {
-                const res = await fetch(`${CONFIG.repoApiRoot}${filename}`, {
-                    headers: {
-                        'Authorization': `token ${CONFIG.githubToken}`,
-                        'Accept': 'application/vnd.github.v3+json' // 适配GitHub API版本
-                    },
-                    cache: 'no-cache'
-                });
-                if (res.status === 404) return null;
-                const data = await res.json();
-                return data.sha;
-            } catch (err) {
-                console.log('获取SHA失败：', err);
-                return null;
-            }
-        }
-
-        // 核心函数：记录统计日志（简化逻辑，减少出错点）
-        async function recordAccessLog() {
-            const currentDate = getCurrentDate();
-            const logFilename = `download-log-${currentDate}.json`;
-            const userIP = await getUserIP();
-            const accessTime = new Date().toISOString();
-
-            // 初始化日志数据
-            let logData = { records: [] };
-            try {
-                // 读取现有日志（若无则跳过）
-                const res = await fetch(`${CONFIG.repoApiRoot}${logFilename}`, {
-                    headers: {
-                        'Authorization': `token ${CONFIG.githubToken}`,
-                        'Accept': 'application/vnd.github.v3+json'
-                    },
-                    cache: 'no-cache'
-                });
-                if (res.ok) {
-                    const fileData = await res.json();
-                    logData = JSON.parse(atob(fileData.content));
-                }
-            } catch (err) {
-                console.log('读取现有日志失败（首次创建）：', err);
-            }
-
+        // 3. 添加下载记录
+        async function addDownloadRecord() {
+            // 获取IP和时间
+            const ip = await getUserIP();
+            const now = new Date();
+            const timeStr = now.toLocaleString('zh-CN'); // 本地时间格式：2026/3/17 15:30:25
+            
+            // 读取现有记录
+            const records = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
             // 添加新记录
-            logData.records.push({ ip: userIP, accessTime: accessTime });
+            records.push({
+                time: timeStr,
+                ip: ip
+            });
+            // 保存回本地存储
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+            
+            // 更新页面显示
+            updateCountAndTable();
+        }
 
-            // 上传日志（核心修复：适配API格式）
+        // 4. 更新计数和表格
+        function updateCountAndTable() {
+            const records = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+            const count = records.length;
+            
+            // 更新总计数
+            document.getElementById('totalCount').textContent = count;
+            
+            // 更新表格
+            const tbody = document.getElementById('recordsBody');
+            if (count === 0) {
+                tbody.innerHTML = '<tr><td colspan="3" class="empty-tip">暂无下载记录</td></tr>';
+                return;
+            }
+            
+            // 生成表格行
+            let html = '';
+            records.forEach((item, index) => {
+                html += `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td>${item.time}</td>
+                        <td>${item.ip}</td>
+                    </tr>
+                `;
+            });
+            tbody.innerHTML = html;
+        }
+
+        // 5. 获取最新版本号
+        async function getLatestVersion() {
             try {
-                const sha = await getFileSHA(logFilename);
-                const res = await fetch(`${CONFIG.repoApiRoot}${logFilename}`, {
-                    method: sha ? 'PUT' : 'POST',
-                    headers: {
-                        'Authorization': `token ${CONFIG.githubToken}`,
-                        'Accept': 'application/vnd.github.v3+json',
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        message: `Record access log: ${currentDate}`,
-                        content: btoa(unescape(encodeURIComponent(JSON.stringify(logData, null, 2)))), // 修复中文/特殊字符编码
-                        sha: sha,
-                        branch: 'main' // 指定主分支
-                    })
-                });
-
-                if (res.ok) {
-                    document.getElementById('status').className = 'status success';
-                    document.getElementById('status').textContent = '访问信息记录成功！';
-                } else {
-                    const errData = await res.json();
-                    throw new Error(`API错误：${errData.message}`);
-                }
+                const res = await fetch(CONFIG.versionApi);
+                const data = await res.json();
+                const version = data.tag_name || 'v1.0.0'; // 版本号（如v1.0.0）
+                document.getElementById('version').textContent = version;
             } catch (err) {
-                console.log('记录日志失败：', err);
-                document.getElementById('status').className = 'status error';
-                document.getElementById('status').textContent = '访问信息记录失败（详情看控制台）！';
+                console.log('获取版本号失败：', err);
+                document.getElementById('version').textContent = '未知版本';
             }
         }
 
-        // 简化清理旧日志（可选，减少出错点）
-        async function cleanOldLogs() {
-            try {
-                const cutoffDate = getDateBeforeNDays(CONFIG.keepDays);
-                const cutoffTimestamp = new Date(cutoffDate).getTime();
-
-                const res = await fetch(CONFIG.repoApiRoot, {
-                    headers: {
-                        'Authorization': `token ${CONFIG.githubToken}`,
-                        'Accept': 'application/vnd.github.v3+json'
-                    },
-                    cache: 'no-cache'
-                });
-                const files = await res.json();
-
-                for (const file of files) {
-                    if (file.name.startsWith('download-log-') && file.name.endsWith('.json')) {
-                        const fileDate = file.name.replace('download-log-', '').replace('.json', '');
-                        const fileTimestamp = new Date(fileDate).getTime();
-                        if (fileTimestamp < cutoffTimestamp) {
-                            const sha = await getFileSHA(file.name);
-                            if (sha) {
-                                await fetch(`${CONFIG.repoApiRoot}${file.name}`, {
-                                    method: 'DELETE',
-                                    headers: {
-                                        'Authorization': `token ${CONFIG.githubToken}`,
-                                        'Accept': 'application/vnd.github.v3+json',
-                                        'Content-Type': 'application/json'
-                                    },
-                                    body: JSON.stringify({
-                                        message: `Delete old log: ${file.name}`,
-                                        sha: sha,
-                                        branch: 'main'
-                                    })
-                                });
-                                console.log('已删除旧日志：', file.name);
-                            }
-                        }
-                    }
-                }
-            } catch (err) {
-                console.log('清理旧日志失败：', err);
-            }
+        // 6. 绑定下载按钮事件
+        function bindDownloadEvent() {
+            const downloadBtn = document.getElementById('downloadLink');
+            // 设置下载链接
+            downloadBtn.href = CONFIG.downloadUrl;
+            // 点击下载时添加记录
+            downloadBtn.addEventListener('click', async (e) => {
+                await addDownloadRecord();
+                // 提示下载开始
+                downloadBtn.textContent = '正在下载...';
+                setTimeout(() => {
+                    downloadBtn.textContent = '下载最新版本';
+                }, 2000);
+            });
         }
 
-        // 主流程：仅执行统计（移除下载逻辑）
+        // 7. 页面加载完成后初始化
         window.onload = async function() {
-            await recordAccessLog();
-            await cleanOldLogs();
+            // 初始化本地存储
+            initStorage();
+            // 更新初始计数和表格
+            updateCountAndTable();
+            // 获取版本号
+            await getLatestVersion();
+            // 绑定下载事件
+            bindDownloadEvent();
+            
+            // 可选：页面加载时自动触发下载（如需）
+            // await addDownloadRecord(); // 记录访问
+            // downloadBtn.click(); // 自动下载
         };
     </script>
 </body>
