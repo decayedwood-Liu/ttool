@@ -1,8 +1,8 @@
 
 on:
   schedule:
-    # 每天凌晨 2 点运行（UTC）
-    - cron: '0 2 * * *'
+    # 每天凌晨 0 点运行（UTC+8）
+    - cron: '0 16 * * *'
   workflow_dispatch:   # 支持手动触发
 
 jobs:
