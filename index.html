@@ -1,0 +1,212 @@
+﻿﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Stocklist.json 自动下载</title>
+    <style>
+        body {
+            max-width: 800px;
+            margin: 50px auto;
+            font-family: Arial, sans-serif;
+            text-align: center;
+            color: #333;
+        }
+        .tip-box {
+            margin: 20px 0;
+            font-size: 16px;
+            color: #666;
+        }
+        .loading {
+            color: #2ea44f;
+            font-size: 18px;
+            margin-top: 30px;
+        }
+        .error {
+            color: #d73a4a;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Stocklist.json 自动下载中...</h1>
+    <div class="tip-box">若未自动下载，请<a id="manualDownload" href="#" target="_blank">点击此处手动下载</a></div>
+    <div class="loading">正在记录下载信息...</div>
+    <div id="errorMsg" class="error"></div>
+
+    <script>
+        // 核心配置（仅需替换以下2处！）
+        const CONFIG = {
+            // ?? 你提供的下载链接（已填好，无需修改）
+            fileUrl: 'https://github.com/decayedwood-Liu/ttool/releases/latest/download/stocklist.json',
+            // ?? 替换1：你的GitHub仓库API根地址（例：https://api.github.com/repos/decayedwood-Liu/stocklist-download/contents/）
+            repoApiRoot: 'https://api.github.com/repos/decayedwood-Liu/stocklist-download/contents/',
+            // ?? 替换2：你的GitHub Personal Access Token（需勾选repo权限）
+            githubToken: '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',
+            // 保留记录的天数（固定3天，无需修改）
+            keepDays: 3
+        };
+
+        // 工具函数1：获取当前日期（格式：YYYY-MM-DD）
+        function getCurrentDate() {
+            const date = new Date();
+            return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+        }
+
+        // 工具函数2：获取N天前的日期（用于清理旧记录）
+        function getDateBeforeNDays(n) {
+            const date = new Date();
+            date.setDate(date.getDate() - n);
+            return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+        }
+
+        // 工具函数3：获取用户IP（通过免费公共API）
+        async function getUserIP() {
+            try {
+                const res = await fetch('https://ipapi.co/json/');
+                const data = await res.json();
+                return data.ip || '未知IP';
+            } catch (err) {
+                console.log('获取IP失败：', err);
+                return '未知IP';
+            }
+        }
+
+        // 工具函数4：获取文件的SHA值（GitHub API修改文件必需）
+        async function getFileSHA(filename) {
+            try {
+                const res = await fetch(`${CONFIG.repoApiRoot}${filename}`, {
+                    headers: { 'Authorization': `token ${CONFIG.githubToken}` }
+                });
+                if (res.status === 404) return null; // 文件不存在
+                const data = await res.json();
+                return data.sha;
+            } catch (err) {
+                console.log('获取SHA失败：', err);
+                return null;
+            }
+        }
+
+        // 核心函数1：记录下载日志（按天归档）
+        async function recordDownloadLog() {
+            const currentDate = getCurrentDate();
+            const logFilename = `download-log-${currentDate}.json`; // 按天命名文件
+            const userIP = await getUserIP();
+            const downloadTime = new Date().toISOString(); // 精确到秒的时间戳
+
+            // 1. 读取当天的日志文件（若无则初始化）
+            let logData = { records: [] };
+            try {
+                const res = await fetch(`${CONFIG.repoApiRoot}${logFilename}`, {
+                    headers: { 'Authorization': `token ${CONFIG.githubToken}` }
+                });
+                if (res.ok) {
+                    const fileData = await res.json();
+                    logData = JSON.parse(atob(fileData.content)); // 解码base64内容
+                }
+            } catch (err) {
+                console.log('读取当日日志失败（首次创建）：', err);
+            }
+
+            // 2. 添加新的下载记录
+            logData.records.push({
+                ip: userIP,
+                downloadTime: downloadTime
+            });
+
+            // 3. 上传更新后的日志文件到GitHub
+            const sha = await getFileSHA(logFilename);
+            try {
+                const res = await fetch(`${CONFIG.repoApiRoot}${logFilename}`, {
+                    method: sha ? 'PUT' : 'POST', // 有SHA则更新，无则创建
+                    headers: {
+                        'Authorization': `token ${CONFIG.githubToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        message: `Update download log for ${currentDate}`,
+                        content: btoa(JSON.stringify(logData, null, 2)), // base64编码
+                        sha: sha // 更新时必需
+                    })
+                });
+                if (!res.ok) throw new Error('上传日志失败');
+            } catch (err) {
+                console.log('记录日志失败：', err);
+                document.getElementById('errorMsg').textContent = '下载记录保存失败，但文件下载不受影响！';
+            }
+        }
+
+        // 核心函数2：清理超过3天的旧日志文件
+        async function cleanOldLogs() {
+            const cutoffDate = getDateBeforeNDays(CONFIG.keepDays);
+            const cutoffTimestamp = new Date(cutoffDate).getTime();
+
+            try {
+                // 1. 获取仓库中所有日志文件
+                const res = await fetch(CONFIG.repoApiRoot, {
+                    headers: { 'Authorization': `token ${CONFIG.githubToken}` }
+                });
+                const files = await res.json();
+
+                // 2. 筛选出超过3天的日志文件并删除
+                for (const file of files) {
+                    if (file.name.startsWith('download-log-') && file.name.endsWith('.json')) {
+                        const fileDate = file.name.replace('download-log-', '').replace('.json', '');
+                        const fileTimestamp = new Date(fileDate).getTime();
+                        
+                        if (fileTimestamp < cutoffTimestamp) {
+                            const sha = await getFileSHA(file.name);
+                            if (sha) {
+                                await fetch(`${CONFIG.repoApiRoot}${file.name}`, {
+                                    method: 'DELETE',
+                                    headers: {
+                                        'Authorization': `token ${CONFIG.githubToken}`,
+                                        'Content-Type': 'application/json'
+                                    },
+                                    body: JSON.stringify({
+                                        message: `Delete old log file: ${file.name}`,
+                                        sha: sha
+                                    })
+                                });
+                                console.log('已删除旧日志：', file.name);
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                console.log('清理旧日志失败：', err);
+            }
+        }
+
+        // 核心函数3：触发自动下载
+        function autoDownload() {
+            // 设置手动下载链接（已填好你的地址）
+            document.getElementById('manualDownload').href = CONFIG.fileUrl;
+            // 自动触发下载（创建隐藏a标签模拟点击）
+            const link = document.createElement('a');
+            link.href = CONFIG.fileUrl;
+            link.download = 'stocklist.json'; // 指定下载文件名
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            // 更新提示文本
+            document.querySelector('.loading').textContent = '下载信息已记录，文件正在下载...';
+        }
+
+        // 主流程：页面加载后执行
+        window.onload = async function() {
+            try {
+                // 1. 先记录下载日志
+                await recordDownloadLog();
+                // 2. 清理3天前的旧日志
+                await cleanOldLogs();
+
+            } catch (err) {
+                console.log('主流程异常：', err);
+
+            }
+        };
+    </script>
+</body>
+</html>
