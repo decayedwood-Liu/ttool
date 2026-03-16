@@ -1,8 +1,8 @@
-﻿﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>Stocklist.json 自动下载</title>
+    <title>下载统计页面</title>
     <style>
         body {
             max-width: 800px;
@@ -11,58 +11,60 @@
             text-align: center;
             color: #333;
         }
-        .tip-box {
-            margin: 20px 0;
+        .tip {
             font-size: 16px;
             color: #666;
+            margin-top: 20px;
         }
-        .loading {
-            color: #2ea44f;
+        .status {
+            margin-top: 10px;
             font-size: 18px;
-            margin-top: 30px;
+        }
+        .success {
+            color: #2ea44f;
         }
         .error {
             color: #d73a4a;
-            margin-top: 10px;
         }
     </style>
 </head>
 <body>
-    <h1>Stocklist.json 自动下载中...</h1>
-    <div class="tip-box">若未自动下载，请<a id="manualDownload" href="#" target="_blank">点击此处手动下载</a></div>
-    <div class="loading">正在记录下载信息...</div>
-    <div id="errorMsg" class="error"></div>
+    <h1>下载统计已触发</h1>
+    <div class="tip">统计信息正在记录，你可单独发起下载请求</div>
+    <div id="status" class="status">正在记录访问信息...</div>
 
     <script>
-        // 核心配置（仅需替换以下2处！）
+        // 核心配置（已修复仓库名，仅需确认Token正确）
         const CONFIG = {
-            // ?? 你提供的下载链接（已填好，无需修改）
-            fileUrl: 'https://github.com/decayedwood-Liu/ttool/releases/latest/download/stocklist.json',
-            // ?? 替换1：你的GitHub仓库API根地址（例：https://api.github.com/repos/decayedwood-Liu/stocklist-download/contents/）
+            // ✅ 正确的仓库API根地址（匹配你的ttool仓库）
             repoApiRoot: 'https://api.github.com/repos/decayedwood-Liu/ttool/contents/',
-            // ?? 替换2：你的GitHub Personal Access Token（需勾选repo权限）
+            // ✅ 你的Token（已保留，确认勾选repo权限）
             githubToken: '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',
-            // 保留记录的天数（固定3天，无需修改）
+            // 保留记录的天数
             keepDays: 3
         };
 
-        // 工具函数1：获取当前日期（格式：YYYY-MM-DD）
+        // 工具函数1：获取当前日期（YYYY-MM-DD）
         function getCurrentDate() {
             const date = new Date();
             return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
         }
 
-        // 工具函数2：获取N天前的日期（用于清理旧记录）
+        // 工具函数2：获取N天前的日期
         function getDateBeforeNDays(n) {
             const date = new Date();
             date.setDate(date.getDate() - n);
             return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
         }
 
-        // 工具函数3：获取用户IP（通过免费公共API）
+        // 工具函数3：获取用户IP（替换为更稳定的API，避免跨域）
         async function getUserIP() {
             try {
-                const res = await fetch('https://ipapi.co/json/');
+                // 替换为无跨域限制的IP API
+                const res = await fetch('https://api.ipify.org?format=json', {
+                    mode: 'cors', // 强制跨域
+                    cache: 'no-cache'
+                });
                 const data = await res.json();
                 return data.ip || '未知IP';
             } catch (err) {
@@ -71,13 +73,17 @@
             }
         }
 
-        // 工具函数4：获取文件的SHA值（GitHub API修改文件必需）
+        // 工具函数4：获取文件SHA（增加容错）
         async function getFileSHA(filename) {
             try {
                 const res = await fetch(`${CONFIG.repoApiRoot}${filename}`, {
-                    headers: { 'Authorization': `token ${CONFIG.githubToken}` }
+                    headers: {
+                        'Authorization': `token ${CONFIG.githubToken}`,
+                        'Accept': 'application/vnd.github.v3+json' // 适配GitHub API版本
+                    },
+                    cache: 'no-cache'
                 });
-                if (res.status === 404) return null; // 文件不存在
+                if (res.status === 404) return null;
                 const data = await res.json();
                 return data.sha;
             } catch (err) {
@@ -86,73 +92,86 @@
             }
         }
 
-        // 核心函数1：记录下载日志（按天归档）
-        async function recordDownloadLog() {
+        // 核心函数：记录统计日志（简化逻辑，减少出错点）
+        async function recordAccessLog() {
             const currentDate = getCurrentDate();
-            const logFilename = `download-log-${currentDate}.json`; // 按天命名文件
+            const logFilename = `download-log-${currentDate}.json`;
             const userIP = await getUserIP();
-            const downloadTime = new Date().toISOString(); // 精确到秒的时间戳
+            const accessTime = new Date().toISOString();
 
-            // 1. 读取当天的日志文件（若无则初始化）
+            // 初始化日志数据
             let logData = { records: [] };
             try {
+                // 读取现有日志（若无则跳过）
                 const res = await fetch(`${CONFIG.repoApiRoot}${logFilename}`, {
-                    headers: { 'Authorization': `token ${CONFIG.githubToken}` }
+                    headers: {
+                        'Authorization': `token ${CONFIG.githubToken}`,
+                        'Accept': 'application/vnd.github.v3+json'
+                    },
+                    cache: 'no-cache'
                 });
                 if (res.ok) {
                     const fileData = await res.json();
-                    logData = JSON.parse(atob(fileData.content)); // 解码base64内容
+                    logData = JSON.parse(atob(fileData.content));
                 }
             } catch (err) {
-                console.log('读取当日日志失败（首次创建）：', err);
+                console.log('读取现有日志失败（首次创建）：', err);
             }
 
-            // 2. 添加新的下载记录
-            logData.records.push({
-                ip: userIP,
-                downloadTime: downloadTime
-            });
+            // 添加新记录
+            logData.records.push({ ip: userIP, accessTime: accessTime });
 
-            // 3. 上传更新后的日志文件到GitHub
-            const sha = await getFileSHA(logFilename);
+            // 上传日志（核心修复：适配API格式）
             try {
+                const sha = await getFileSHA(logFilename);
                 const res = await fetch(`${CONFIG.repoApiRoot}${logFilename}`, {
-                    method: sha ? 'PUT' : 'POST', // 有SHA则更新，无则创建
+                    method: sha ? 'PUT' : 'POST',
                     headers: {
                         'Authorization': `token ${CONFIG.githubToken}`,
+                        'Accept': 'application/vnd.github.v3+json',
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        message: `Update download log for ${currentDate}`,
-                        content: btoa(JSON.stringify(logData, null, 2)), // base64编码
-                        sha: sha // 更新时必需
+                        message: `Record access log: ${currentDate}`,
+                        content: btoa(unescape(encodeURIComponent(JSON.stringify(logData, null, 2)))), // 修复中文/特殊字符编码
+                        sha: sha,
+                        branch: 'main' // 指定主分支
                     })
                 });
-                if (!res.ok) throw new Error('上传日志失败');
+
+                if (res.ok) {
+                    document.getElementById('status').className = 'status success';
+                    document.getElementById('status').textContent = '访问信息记录成功！';
+                } else {
+                    const errData = await res.json();
+                    throw new Error(`API错误：${errData.message}`);
+                }
             } catch (err) {
                 console.log('记录日志失败：', err);
-                document.getElementById('errorMsg').textContent = '下载记录保存失败，但文件下载不受影响！';
+                document.getElementById('status').className = 'status error';
+                document.getElementById('status').textContent = '访问信息记录失败（详情看控制台）！';
             }
         }
 
-        // 核心函数2：清理超过3天的旧日志文件
+        // 简化清理旧日志（可选，减少出错点）
         async function cleanOldLogs() {
-            const cutoffDate = getDateBeforeNDays(CONFIG.keepDays);
-            const cutoffTimestamp = new Date(cutoffDate).getTime();
-
             try {
-                // 1. 获取仓库中所有日志文件
+                const cutoffDate = getDateBeforeNDays(CONFIG.keepDays);
+                const cutoffTimestamp = new Date(cutoffDate).getTime();
+
                 const res = await fetch(CONFIG.repoApiRoot, {
-                    headers: { 'Authorization': `token ${CONFIG.githubToken}` }
+                    headers: {
+                        'Authorization': `token ${CONFIG.githubToken}`,
+                        'Accept': 'application/vnd.github.v3+json'
+                    },
+                    cache: 'no-cache'
                 });
                 const files = await res.json();
 
-                // 2. 筛选出超过3天的日志文件并删除
                 for (const file of files) {
                     if (file.name.startsWith('download-log-') && file.name.endsWith('.json')) {
                         const fileDate = file.name.replace('download-log-', '').replace('.json', '');
                         const fileTimestamp = new Date(fileDate).getTime();
-                        
                         if (fileTimestamp < cutoffTimestamp) {
                             const sha = await getFileSHA(file.name);
                             if (sha) {
@@ -160,11 +179,13 @@
                                     method: 'DELETE',
                                     headers: {
                                         'Authorization': `token ${CONFIG.githubToken}`,
+                                        'Accept': 'application/vnd.github.v3+json',
                                         'Content-Type': 'application/json'
                                     },
                                     body: JSON.stringify({
-                                        message: `Delete old log file: ${file.name}`,
-                                        sha: sha
+                                        message: `Delete old log: ${file.name}`,
+                                        sha: sha,
+                                        branch: 'main'
                                     })
                                 });
                                 console.log('已删除旧日志：', file.name);
@@ -177,20 +198,10 @@
             }
         }
 
-      
-
-        // 主流程：页面加载后执行
+        // 主流程：仅执行统计（移除下载逻辑）
         window.onload = async function() {
-            try {
-                // 1. 先记录下载日志
-                await recordDownloadLog();
-                // 2. 清理3天前的旧日志
-                await cleanOldLogs();
-
-            } catch (err) {
-                console.log('主流程异常：', err);
-
-            }
+            await recordAccessLog();
+            await cleanOldLogs();
         };
     </script>
 </body>
