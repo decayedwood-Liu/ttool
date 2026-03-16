@@ -43,9 +43,13 @@
             font-size: 16px;
             margin-top: 10px;
             cursor: pointer;
+            transition: background 0.2s;
         }
         .download-btn:hover {
             background: #22863a;
+        }
+        .download-btn:active {
+            background: #1a732e;
         }
         .records-box {
             margin-top: 40px;
@@ -96,12 +100,12 @@
 
     <!-- 当日下载记录表格 -->
     <div class="records-box">
-        <div class="records-title">今日下载记录（仅显示当前页面访问的记录）</div>
+        <div class="records-title">今日下载记录</div>
         <table id="recordsTable">
             <thead>
                 <tr>
                     <th>序号</th>
-                    <th>下载时间</th>
+                    <th>下载时间（北京时间）</th>
                     <th>IP地址</th>
                 </tr>
             </thead>
@@ -119,54 +123,126 @@
             // 最新文件下载链接
             downloadUrl: 'https://github.com/decayedwood-Liu/ttool/releases/latest/download/stocklist.json',
             // 获取版本号的API（GitHub Releases）
-            versionApi: 'https://api.github.com/repos/decayedwood-Liu/ttool/releases/latest'
+            versionApi: 'https://api.github.com/repos/decayedwood-Liu/ttool/releases/latest',
+            // 多个IP获取接口（备用）
+            ipApis: [
+                'https://api.ipify.org?format=json',
+                'https://ipapi.co/json/',
+                'https://jsonip.com/'
+            ],
+            // 请求超时时间（毫秒）
+            timeout: 5000
         };
 
-        // 本地存储键名（按天区分）
-        const today = new Date().toISOString().split('T')[0]; // 2026-03-17
+        // 本地存储键名（按天区分，北京时间）
+        const now = new Date();
+        now.setTime(now.getTime() + 8 * 3600 * 1000); // 转为北京时间
+        const today = now.toISOString().split('T')[0]; // 2026-03-17（北京时间）
         const STORAGE_KEY = `download_records_${today}`;
 
-        // 1. 初始化本地存储
+        // 1. 超时请求封装
+        function fetchWithTimeout(url, options = {}, timeout = CONFIG.timeout) {
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error('请求超时')), timeout);
+                fetch(url, options)
+                    .then(response => {
+                        clearTimeout(timer);
+                        resolve(response);
+                    })
+                    .catch(error => {
+                        clearTimeout(timer);
+                        reject(error);
+                    });
+            });
+        }
+
+        // 2. 初始化本地存储
         function initStorage() {
             if (!localStorage.getItem(STORAGE_KEY)) {
                 localStorage.setItem(STORAGE_KEY, JSON.stringify([]));
             }
         }
 
-        // 2. 获取用户IP
+        // 3. 获取用户IP（多接口备用）
         async function getUserIP() {
+            // 依次尝试多个IP接口
+            for (const api of CONFIG.ipApis) {
+                try {
+                    const res = await fetchWithTimeout(api);
+                    if (!res.ok) continue;
+                    
+                    const data = await res.json();
+                    // 适配不同接口的IP字段
+                    const ip = data.ip || data.query || data.origin || null;
+                    if (ip && ip !== '::1' && ip !== '127.0.0.1') {
+                        return ip;
+                    }
+                } catch (err) {
+                    console.log(`IP接口 ${api} 失败：`, err);
+                    continue;
+                }
+            }
+            
+            // 所有接口都失败时，尝试获取本地IP（仅供参考）
             try {
-                const res = await fetch('https://api.ipify.org?format=json');
+                const res = await fetchWithTimeout('https://api.myip.com/');
                 const data = await res.json();
                 return data.ip || '未知IP';
             } catch (err) {
-                console.log('获取IP失败：', err);
                 return '未知IP';
             }
         }
 
-        // 3. 添加下载记录
-        async function addDownloadRecord() {
-            // 获取IP和时间
-            const ip = await getUserIP();
-            const now = new Date();
-            const timeStr = now.toLocaleString('zh-CN'); // 本地时间格式：2026/3/17 15:30:25
-            
-            // 读取现有记录
-            const records = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-            // 添加新记录
-            records.push({
-                time: timeStr,
-                ip: ip
-            });
-            // 保存回本地存储
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
-            
-            // 更新页面显示
-            updateCountAndTable();
+        // 4. 格式化北京时间
+        function formatBeijingTime() {
+            const date = new Date();
+            // 转为北京时间（东八区）
+            date.setTime(date.getTime() + 8 * 3600 * 1000);
+            // 格式：2026-03-17 15:44:02
+            return `${date.getFullYear()}-${(date.getMonth()+1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`;
         }
 
-        // 4. 更新计数和表格
+        // 5. 添加下载记录（防重复提交）
+        let isSubmitting = false;
+        async function addDownloadRecord() {
+            if (isSubmitting) return;
+            isSubmitting = true;
+
+            try {
+                // 获取IP和北京时间
+                const ip = await getUserIP();
+                const timeStr = formatBeijingTime();
+                
+                // 读取现有记录
+                const records = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+                
+                // 去重（避免重复点击）
+                const isDuplicate = records.some(item => 
+                    item.time === timeStr && item.ip === ip
+                );
+                if (isDuplicate) {
+                    isSubmitting = false;
+                    return;
+                }
+                
+                // 添加新记录
+                records.push({
+                    time: timeStr,
+                    ip: ip
+                });
+                // 保存回本地存储
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+                
+                // 更新页面显示
+                updateCountAndTable();
+            } catch (err) {
+                console.log('添加记录失败：', err);
+            } finally {
+                isSubmitting = false;
+            }
+        }
+
+        // 6. 更新计数和表格
         function updateCountAndTable() {
             const records = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
             const count = records.length;
@@ -181,12 +257,12 @@
                 return;
             }
             
-            // 生成表格行
+            // 生成表格行（倒序显示，最新记录在最上面）
             let html = '';
-            records.forEach((item, index) => {
+            records.reverse().forEach((item, index) => {
                 html += `
                     <tr>
-                        <td>${index + 1}</td>
+                        <td>${count - index}</td>
                         <td>${item.time}</td>
                         <td>${item.ip}</td>
                     </tr>
@@ -195,10 +271,12 @@
             tbody.innerHTML = html;
         }
 
-        // 5. 获取最新版本号
+        // 7. 获取最新版本号（带超时）
         async function getLatestVersion() {
             try {
-                const res = await fetch(CONFIG.versionApi);
+                const res = await fetchWithTimeout(CONFIG.versionApi);
+                if (!res.ok) throw new Error('版本接口返回失败');
+                
                 const data = await res.json();
                 const version = data.tag_name || 'v1.0.0'; // 版本号（如v1.0.0）
                 document.getElementById('version').textContent = version;
@@ -208,7 +286,7 @@
             }
         }
 
-        // 6. 绑定下载按钮事件
+        // 8. 绑定下载按钮事件
         function bindDownloadEvent() {
             const downloadBtn = document.getElementById('downloadLink');
             // 设置下载链接
@@ -216,7 +294,7 @@
             // 点击下载时添加记录
             downloadBtn.addEventListener('click', async (e) => {
                 await addDownloadRecord();
-                // 提示下载开始
+                // 按钮状态反馈
                 downloadBtn.textContent = '正在下载...';
                 setTimeout(() => {
                     downloadBtn.textContent = '下载最新版本';
@@ -224,7 +302,7 @@
             });
         }
 
-        // 7. 页面加载完成后初始化
+        // 9. 页面加载完成后初始化
         window.onload = async function() {
             // 初始化本地存储
             initStorage();
@@ -234,10 +312,6 @@
             await getLatestVersion();
             // 绑定下载事件
             bindDownloadEvent();
-            
-            // 可选：页面加载时自动触发下载（如需）
-            // await addDownloadRecord(); // 记录访问
-            // downloadBtn.click(); // 自动下载
         };
     </script>
 </body>
