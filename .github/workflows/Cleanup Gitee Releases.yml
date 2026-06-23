@@ -23,135 +23,155 @@ jobs:
         with:
           node-version: '20'
       
-      - name: Run cleanup
+      - name: Create cleanup script
         run: |
-          node -e "
-            const GITEE_TOKEN = process.env.GITEE_TOKEN;
-            const OWNER = process.env.GITEE_OWNER;
-            const REPO = process.env.GITEE_REPO;
-            const API_BASE = 'https://gitee.com/api/v5';
-            const KEEP = 2;
-            const SPECIAL_TAGS = ['v720260615', 'v6'];
+          cat > cleanup.js << 'EOF'
+          const GITEE_TOKEN = process.env.GITEE_TOKEN;
+          const OWNER = process.env.GITEE_OWNER;
+          const REPO = process.env.GITEE_REPO;
+          const API_BASE = 'https://gitee.com/api/v5';
+          const KEEP = 2;
+          const SPECIAL_TAGS = ['v720260615', 'v6'];
 
-            async function giteeRequest(url, options = {}) {
-              const response = await fetch(url, {
-                ...options,
-                headers: {
-                  'Authorization': ` + '`token ${GITEE_TOKEN}`' + `,
-                  'Content-Type': 'application/json',
-                }
-              });
-              if (!response.ok) {
-                const error = await response.text();
-                throw new Error(` + '`HTTP ${response.status}: ${error}`' + `);
+          async function giteeRequest(url, options = {}) {
+            const response = await fetch(url, {
+              ...options,
+              headers: {
+                'Authorization': `token ${GITEE_TOKEN}`,
+                'Content-Type': 'application/json',
               }
-              return response;
+            });
+            if (!response.ok) {
+              const error = await response.text();
+              throw new Error(`HTTP ${response.status}: ${error}`);
+            }
+            return response;
+          }
+
+          async function getReleases() {
+            let allReleases = [];
+            let page = 1;
+            const perPage = 100;
+            while (true) {
+              const url = `${API_BASE}/repos/${OWNER}/${REPO}/releases?page=${page}&per_page=${perPage}`;
+              const response = await giteeRequest(url);
+              const data = await response.json();
+              if (!Array.isArray(data) || data.length === 0) break;
+              allReleases = allReleases.concat(data);
+              page++;
+              if (data.length < perPage) break;
+            }
+            return allReleases;
+          }
+
+          async function deleteRelease(releaseId, tagName) {
+            try {
+              const url = `${API_BASE}/repos/${OWNER}/${REPO}/releases/${releaseId}`;
+              const response = await giteeRequest(url, { method: 'DELETE' });
+              if (response.status === 204) {
+                console.log(`✅ Release 已删除 (tag: ${tagName})`);
+                return true;
+              }
+              return false;
+            } catch (error) {
+              console.log(`❌ Release 删除失败: ${error.message}`);
+              return false;
+            }
+          }
+
+          async function deleteTag(tagName) {
+            try {
+              const encodedTag = encodeURIComponent(tagName);
+              const url = `${API_BASE}/repos/${OWNER}/${REPO}/tags/${encodedTag}`;
+              const response = await giteeRequest(url, { method: 'DELETE' });
+              if (response.status === 204) {
+                console.log(`✅ Tag 已删除: ${tagName}`);
+                return true;
+              }
+              return false;
+            } catch (error) {
+              if (error.message.includes('404')) {
+                console.log(`⚠️ Tag 不存在: ${tagName}`);
+                return true;
+              }
+              console.log(`⚠️ Tag 删除失败: ${error.message}`);
+              return false;
+            }
+          }
+
+          async function main() {
+            console.log('========== Gitee Release 清理 ==========');
+            console.log(`仓库: ${OWNER}/${REPO}`);
+            console.log(`保留最新 ${KEEP} 个 + 特殊 tags: ${SPECIAL_TAGS.join(', ')}`);
+            console.log('');
+
+            const releases = await getReleases();
+            console.log(`找到 ${releases.length} 个 Release\n`);
+
+            if (releases.length === 0) {
+              console.log('没有 Release 需要处理');
+              return;
             }
 
-            async function getReleases() {
-              let allReleases = [];
-              let page = 1;
-              const perPage = 100;
-              while (true) {
-                const url = ` + '`${API_BASE}/repos/${OWNER}/${REPO}/releases?page=${page}&per_page=${perPage}`' + `;
-                const response = await giteeRequest(url);
-                const data = await response.json();
-                if (!Array.isArray(data) || data.length === 0) break;
-                allReleases = allReleases.concat(data);
-                page++;
-                if (data.length < perPage) break;
-              }
-              return allReleases;
-            }
+            console.log('当前所有 Release:');
+            releases.forEach((rel, idx) => {
+              console.log(`  ${idx + 1}. ${rel.tag_name} - ${rel.name || '无标题'}`);
+            });
+            console.log('');
 
-            async function deleteRelease(releaseId, tagName) {
-              try {
-                const url = ` + '`${API_BASE}/repos/${OWNER}/${REPO}/releases/${releaseId}`' + `;
-                const response = await giteeRequest(url, { method: 'DELETE' });
-                if (response.status === 204) {
-                  console.log(` + '`✅ Release 已删除 (tag: ${tagName})`' + `);
-                  return true;
-                }
-                return false;
-              } catch (error) {
-                console.log(` + '`❌ Release 删除失败: ${error.message}`' + `);
-                return false;
+            const keepIds = new Set();
+
+            console.log('📌 保留特殊 tags:');
+            for (const specialTag of SPECIAL_TAGS) {
+              const specialRelease = releases.find(r => r.tag_name === specialTag);
+              if (specialRelease) {
+                keepIds.add(specialRelease.id);
+                console.log(`   ✅ ${specialTag}`);
+              } else {
+                console.log(`   ⚠️ 未找到: ${specialTag}`);
               }
             }
 
-            async function deleteTag(tagName) {
-              try {
-                const encodedTag = encodeURIComponent(tagName);
-                const url = ` + '`${API_BASE}/repos/${OWNER}/${REPO}/tags/${encodedTag}`' + `;
-                const response = await giteeRequest(url, { method: 'DELETE' });
-                if (response.status === 204) {
-                  console.log(` + '`✅ Tag 已删除: ${tagName}`' + `);
-                  return true;
-                }
-                return false;
-              } catch (error) {
-                if (error.message.includes('404')) {
-                  console.log(` + '`⚠️ Tag 不存在: ${tagName}`' + `);
-                  return true;
-                }
-                console.log(` + '`⚠️ Tag 删除失败: ${error.message}`' + `);
-                return false;
+            console.log(`\n📌 保留最新的 ${KEEP} 个:`);
+            let keptLatest = 0;
+            for (const release of releases) {
+              if (keptLatest >= KEEP) break;
+              if (!keepIds.has(release.id)) {
+                keepIds.add(release.id);
+                keptLatest++;
+                console.log(`   ${keptLatest}. ${release.tag_name}`);
               }
             }
 
-            async function main() {
-              console.log('========== Gitee Release 清理 ==========');
-              console.log(` + '`仓库: ${OWNER}/${REPO}`' + `);
-              console.log(` + '`保留最新 ${KEEP} 个 + 特殊 tags: ${SPECIAL_TAGS.join(', ')}`' + `);
+            console.log(`\n将保留 ${keepIds.size} 个 Release，删除 ${releases.length - keepIds.size} 个`);
+            console.log('========================================\n');
+
+            let deletedCount = 0;
+            for (const release of releases) {
+              if (keepIds.has(release.id)) continue;
+              const tagName = release.tag_name;
+              const releaseName = release.name || tagName;
+              console.log(`🗑️ 清理: ${releaseName} (tag: ${tagName})`);
+              const releaseDeleted = await deleteRelease(release.id, tagName);
+              if (releaseDeleted) {
+                deletedCount++;
+                if (tagName) {
+                  await deleteTag(tagName);
+                }
+              }
               console.log('');
-
-              const releases = await getReleases();
-              console.log(` + '`找到 ${releases.length} 个 Release\\n`' + `);
-
-              if (releases.length === 0) {
-                console.log('没有 Release 需要处理');
-                return;
-              }
-
-              const keepIds = new Set();
-              for (const specialTag of SPECIAL_TAGS) {
-                const specialRelease = releases.find(r => r.tag_name === specialTag);
-                if (specialRelease) {
-                  keepIds.add(specialRelease.id);
-                  console.log(` + '`✅ 保留特殊tag: ${specialTag}`' + `);
-                }
-              }
-
-              let keptLatest = 0;
-              for (const release of releases) {
-                if (keptLatest >= KEEP) break;
-                if (!keepIds.has(release.id)) {
-                  keepIds.add(release.id);
-                  keptLatest++;
-                  console.log(` + '`✅ 保留最新: ${release.tag_name}`' + `);
-                }
-              }
-
-              console.log(` + '`\\n将保留 ${keepIds.size} 个 Release，删除 ${releases.length - keepIds.size} 个\\n`' + `);
-
-              let deletedCount = 0;
-              for (const release of releases) {
-                if (keepIds.has(release.id)) continue;
-                console.log(` + '`🗑️ 清理: ${release.tag_name}`' + `);
-                const releaseDeleted = await deleteRelease(release.id, release.tag_name);
-                if (releaseDeleted) {
-                  deletedCount++;
-                  if (release.tag_name) {
-                    await deleteTag(release.tag_name);
-                  }
-                }
-                console.log('');
-              }
-
-              console.log('========== 清理完成 ==========');
-              console.log(` + '`✅ 保留: ${keepIds.size} 个 Release`' + `);
-              console.log(` + '`🗑️ 删除: ${deletedCount} 个 Release`' + `);
             }
 
-            main().catch(console.error);
-          "
+            console.log('========== 清理完成 ==========');
+            console.log(`✅ 保留: ${keepIds.size} 个 Release`);
+            console.log(`🗑️ 删除: ${deletedCount} 个 Release（及对应的 Tag）`);
+          }
+
+          main().catch(error => {
+            console.error('程序执行出错:', error);
+            process.exit(1);
+          });
+          EOF
+      
+      - name: Run cleanup script
+        run: node cleanup.js
