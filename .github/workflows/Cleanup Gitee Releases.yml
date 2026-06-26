@@ -61,6 +61,12 @@ jobs:
               page++;
               if (data.length < perPage) break;
             }
+            
+            // 按创建时间降序排序（最新的在前）
+            allReleases.sort((a, b) => {
+              return new Date(b.created_at) - new Date(a.created_at);
+            });
+            
             return allReleases;
           }
 
@@ -90,8 +96,9 @@ jobs:
               }
               return false;
             } catch (error) {
-              if (error.message.includes('404')) {
-                console.log(`⚠️ Tag 不存在: ${tagName}`);
+              // 404 表示 Tag 不存在（可能已被自动删除），视为成功
+              if (error.message && error.message.includes('404')) {
+                console.log(`ℹ️ Tag 已不存在或已被自动删除: ${tagName}`);
                 return true;
               }
               console.log(`⚠️ Tag 删除失败: ${error.message}`);
@@ -113,9 +120,9 @@ jobs:
               return;
             }
 
-            console.log('当前所有 Release:');
+            console.log('当前所有 Release（按创建时间降序）:');
             releases.forEach((rel, idx) => {
-              console.log(`  ${idx + 1}. ${rel.tag_name} - ${rel.name || '无标题'}`);
+              console.log(`  ${idx + 1}. ${rel.tag_name} - ${rel.name || '无标题'} (${rel.created_at})`);
             });
             console.log('');
 
@@ -139,7 +146,7 @@ jobs:
               if (!keepIds.has(release.id)) {
                 keepIds.add(release.id);
                 keptLatest++;
-                console.log(`   ${keptLatest}. ${release.tag_name}`);
+                console.log(`   ${keptLatest}. ${release.tag_name} (${release.created_at})`);
               }
             }
 
